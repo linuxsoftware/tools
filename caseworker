@@ -1,0 +1,193 @@
+#!/usr/bin/python
+import sys
+import re
+import os
+import os.path
+
+class SourceFile:
+   def __init__(self, path, hdrFiles, hdrDirs):
+      self.code     = ""
+      self.newCode  = ""
+      self.modified = False
+      self.path     = path
+      self.hdrFiles = hdrFiles
+      self.hdrDirs  = hdrDirs
+
+   def process(self):
+      self.code = file(self.path, "rt").read()
+      
+      start = self.__processInclude()
+      while start:
+         start = self.__processInclude(start)
+
+      if self.modified:
+         print self.path
+         try:
+            os.remove(self.path+".bak")
+         except:
+            pass
+         os.rename(self.path, self.path+".bak")
+         file(self.path, "wt").write(self.newCode)
+
+   # include
+   REinclude = re.compile(r'#[ \t]*include[ \t]*"([^"]*)"')
+
+   def __processInclude(self, startSearch=0):
+      endSearch = 0
+      search = self.REinclude.search(self.code, startSearch)
+      if (search):
+         endSearch = search.end()
+         found = search.group(1)
+         # Not just the filename, but any part of the path might be the wrong
+         # case, e.g. ImageFileInfo instead of imagefileinfo
+         bits = sum([u.split("\\") for u in found.split("/")], [])
+         incl = ""
+         for bit in bits[:-1]:
+            dname = self.hdrDirs.get(bit.lower())
+            if dname:
+               incl += dname + "/"
+            else:
+               incl += bit + "/"
+
+         fname = self.hdrFiles.get(bits[-1].lower())
+         if fname:
+            incl += fname
+         else:
+            incl += bits[-1]
+
+         #print incl, " <or> ", found
+         if incl != found:
+            #print found,"<==>",fname,startSearch,search.start(1),search.end(1)
+            self.modified = True
+            self.newCode += self.code[startSearch:search.start(1)] 
+            self.newCode += incl
+            # this is just a fancy way of saying '"'
+            self.newCode += self.code[search.end(1):endSearch] 
+
+         else:
+            # no change needed for this #include
+            self.newCode += self.code[startSearch:endSearch]
+
+      elif startSearch:
+         # copy over the leftovers
+         self.newCode += self.code[startSearch:]
+
+      return endSearch
+
+
+class SourceTree:
+   IgnoreDirs = ["linux", "vs2003", "djgpp", "vs2005", "Compiled Code Pages"]
+
+   def __init__(self, recurse):
+      self.recurse  = recurse
+      self.hdrDirs  = {}
+      self.hdrFiles = {}
+      self.srcFiles = []
+
+   def search(self, path, addSource):   # addSauce ;-)
+      #import pdb; pdb.set_trace()
+      
+      if not os.path.isdir(path):
+         #TODO fix search up so it doesn't expect a 
+         # directory... this hack is just for now
+         path = os.path.dirname(path)
+         dirEntries = [os.path.basename(path),]
+      else:
+         dirEntries = os.listdir(path)
+         dname    = os.path.basename(path)
+         lowdname = dname.lower()
+         if lowdname not in self.hdrDirs:
+            self.hdrDirs[lowdname] = dname
+         else:
+            if self.hdrDirs[lowdname] != dname:
+               self.hdrDirs[lowdname] = None # DON'T TOUCH
+         
+      for entry in dirEntries:
+         newpath = os.path.join(path, entry)
+         if os.path.isfile(newpath):
+            extn =  os.path.splitext(entry)[1].lower()
+            if extn in (".h", ".hpp"):
+               lowfname = entry.lower()
+               if lowfname not in self.hdrFiles:
+                  self.hdrFiles[lowfname] = entry
+               else:
+                  # we have to be really careful if there are files
+                  # which differ only in the case of their name
+                  if self.hdrFiles[lowfname] != entry:
+                     self.hdrFiles[lowfname] = None # DON'T TOUCH
+
+            if addSource and extn in (".c", ".cpp", ".h", ".hpp"):
+               self.srcFiles.append(newpath)
+
+         elif self.recurse and os.path.isdir(newpath):
+            if entry not in self.IgnoreDirs:
+               newpath = os.path.join(path, entry)
+               self.search(newpath, addSource)
+
+   def process(self):
+      for entry in self.srcFiles:
+         srcFile = SourceFile(entry, self.hdrFiles, self.hdrDirs)
+         srcFile.process()
+
+   def revert(self, path):
+      for entry in os.listdir(path):
+         newpath = os.path.join(path, entry)
+         if os.path.isfile(newpath):
+            path2 = os.path.splitext(newpath)
+            if path2[1] == ".bak":
+               try:
+                  os.remove(path2[0])
+               except:
+                  pass
+               os.rename(newpath, path2[0])
+               sys.stdout.write(".")
+               sys.stdout.flush()
+
+         elif self.recurse and os.path.isdir(newpath):
+            if entry not in self.IgnoreDirs:
+               newpath = os.path.join(path, entry)
+               self.revert(newpath)
+
+
+if __name__ == "__main__":
+   args = sys.argv
+   if len(args) > 1 and args[1] in ("--help", "-h", "-?"):
+      print "This script will fix up C++ source files which get the case of"
+      print "the header files wrong in their #includes"
+      print
+      print "usage:",
+      print "caseworker.py [flags] [source-dir] [additional-include-dirs ...]"
+      print "flags: --no-recurse"
+      print "       --revert"
+      print "       --help"
+      print "note:  the default source-dir is ."
+      sys.exit(0)
+
+   recurse = True
+   if "--no-recurse" in args:
+      recurse = False
+      args.remove("--no-recurse")
+
+   revert  = False
+   if "--revert" in args:
+      revert = True
+      args.remove("--revert")
+
+   sourcePath = "."
+   if len(args) > 1:
+      sourcePath = args[1]
+
+   tree = SourceTree(recurse)
+   if revert:
+      tree.revert(sourcePath)
+      print
+      sys.exit(0)
+
+   for inclDir in args[2:]:
+      tree.search(inclDir, addSource=False)
+
+   tree.search(sourcePath, addSource=True)
+   tree.process()
+   print
+
+
