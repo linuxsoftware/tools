@@ -27,17 +27,19 @@ TARGET=dump treeify
 
 all:		$(TARGET)
 
-dump:		dump.o
-		$(CXX) dump.o -L$(LIBDIR) -lBase -o dump
+tools.o:	tools.C
+
+dump:		dump.o tools.o
+		$(CXX) dump.o tools.o -o dump
  
-#extr.o:		extr.C
-#
-#extr:		extr.o
-#		$(CXX) extr.o -L$(LIBDIR) -lBase -o extr
+extr.o:		extr.C
+
+extr:		extr.o tools.o
+		$(CXX) extr.o tools.o -o extr
  
 treeify.o:	treeify.C
 
-treeify:	treeify.o
+treeify:	treeify.o tools.o
 		$(CXX) treeify.o -o treeify
  
 treeify.o:	treeify.C

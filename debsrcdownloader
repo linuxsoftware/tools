@@ -131,17 +131,11 @@ class DebSrcDownloader(object):
                 if field == "Files":
                     filename = self.TokensRE.findall(line)[2]
                     metadata['Files'].append(filename)
-                    for line in sourcess:
-                        if line[0] != ' ':
-                            break
-                        filename = self.TokensRE.findall(line)[2]
-                        metadata['Files'].append(filename)
+                    continue
                 elif field == "Binary":
                     self.saveBinariesInMetadata(metadata, line)
-                    for line in sourcess:
-                        if line[0] != ' ':
-                            break
-                        self.saveBinariesInMetadata(metadata, line)
+                    continue
+
             field, value = self.getFieldAndValue(line)
             if field == "Package":
                 if metadata:
@@ -214,10 +208,7 @@ class DebSrcDownloader(object):
                 metadata["Downloaded"] = True
 
     def downloadFiles(self, metadata):
-        if metadata['Dist'] == "drbl":
-            destDir = "drbl/%s" % metadata['Directory']
-        else:
-            destDir = "ubuntu/%s" % metadata['Directory']
+        destDir = metadata['Dist']
         if not os.path.isdir(destDir):
             os.makedirs(destDir)
         for filename in metadata["Files"]:
