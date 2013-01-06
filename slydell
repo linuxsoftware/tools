@@ -1,0 +1,293 @@
+#!/usr/bin/python
+# -*- coding: utf-8 -*-
+
+import os
+import sys
+from os import path
+from ConfigParser import SafeConfigParser
+from datetime import date, timedelta
+import urllib
+import urllib2
+import re
+from hashlib import sha256
+import csv
+from pprint import pprint
+
+class BobSlydell(object):
+    def __init__(self):
+        self.here = path.abspath(path.dirname(__file__))
+        self.prefix = "kasdir_"
+        self.config = SafeConfigParser({'username':None,
+                                        'password':None})
+        self.config.add_section('login')
+        self.config.read([path.join(self.here, 'slydell.cfg'),
+                          path.expanduser('~/slydell.cfg')])
+        self.fromWhen = None
+        self.toWhen   = None
+        self.reports  = []
+        self.processArgs()
+ 
+    def processArgs(self):
+        args = sys.argv[1:]
+        while len(args):
+            if args[0] == "--username":
+                args.pop(0)
+                if len(args) == 0: self.usage()
+                self.config.set('login', 'username', args.pop(0))
+            elif args[0] == "--password":
+                args.pop(0)
+                if len(args) == 0: self.usage()
+                self.config.set('login', 'password', args.pop(0))
+            elif args[0] == "--help":
+                self.usage()
+            elif self.fromWhen is None:
+                self.fromWhen = args.pop(0)
+            elif self.toWhen is None:
+                self.toWhen = args.pop(0)
+            else:
+                self.usage()
+
+    def usage(self):
+        print "slydell [options] [from] [to]"
+        print "Fills you in on changes to the company directory"
+        print
+        print "[--help]  displays this help"
+        print
+        print "[--username <name>]  [--password <pwd>]"
+        print "username and password to the NuViewHR system can be given"
+        print "as command line options, or provided in the slydell.cfg file"
+        print
+        print "  from:  defaults to the last report generated"
+        print "    to:  defaults to a new report generated today"
+        print "These can either be the filename of a report or a date"
+        print "which slydell will use to find the nearest report"
+        print "The date should be in ISO format yyyy-mm-dd, or one of "
+        print "the keywords yesterday, today, oldest, latest"
+        sys.exit(1)
+
+    def getReports(self):
+        self.reports = [ filename for filename in os.listdir(self.here)
+                         if filename.startswith(self.prefix) ]
+        if len(self.reports) == 0:
+            print "No previous reports found!!!\n"
+            saveTodaysReport()
+            sys.exit(1)
+        self.reports.sort()
+        fromReport = toReport = ''
+        if self.fromWhen is None:
+            fromReport = self.reports[-1]
+        else:
+            fromReport = self.findReport(self.fromWhen)
+        if self.toWhen is None:
+            toReport = self.saveTodaysReport()
+        else:
+            toReport = self.findReport(self.toWhen)
+
+        return fromReport, toReport
+
+    def findReport(self, whenFor):
+        if whenFor == "today":
+            whenFor = date.today().isoformat()
+        elif whenFor == "yesterday":
+            whenFor = (date.today() - timedelta(days=1)).isoformat()
+        elif whenFor == "oldest":
+            whenFor = self.reports[0]
+        elif whenFor == "latest":
+            whenFor = self.reports[-1]
+        if len(whenFor) == 10 and whenFor[4] == whenFor[7] == '-':
+            filename = self.findClosestReportToDate(whenFor)
+            if filename:
+                return filename
+        if whenFor in self.reports:
+            return whenFor
+        filepath = path.abspath(whenFor)
+        if path.dirname(filepath) == self.here:
+            filename = filepath[len(self.here) + 1:]
+            if filename in self.reports:
+                return filename
+        print "No report matches %s" % whenFor
+        sys.exit(1)
+
+    def findClosestReportToDate(self, whenFor):
+        t1 = date(*(int(v) for v in whenFor.split("-")))
+        prflen = len(self.prefix)
+        report1 = self.reports[0]
+        d1 = date(int(report1[prflen:prflen+4]),
+                  int(report1[prflen+5:prflen+7]),
+                  int(report1[prflen+8:prflen+10]))
+        if t1 < d1:
+            return report1
+        for report2 in self.reports[1:]:
+            d2 = date(int(report2[prflen:prflen+4]),
+                      int(report2[prflen+5:prflen+7]),
+                      int(report2[prflen+8:prflen+10]))
+            mid = d1 + timedelta(days=1) + (d2 - d1) / 2;
+            if d1 <= t1 < mid:
+                return report1
+            elif mid <= t1 < d2:
+                return report2
+            d1 = d2
+            report1 = report2
+        return report1
+
+    def saveTodaysReport(self):
+        filename = "%s%s.csv" % (self.prefix, date.today().isoformat())
+        filepath = path.join(self.here, filename)
+        hr = NuViewHR(self.config)
+        pwdok = hr.login()
+        if not pwdok:
+            print "Wrong password"
+            sys.exit(1)
+        hr.saveDirectory(filepath)
+        return filename
+
+class NuViewHR(object):
+    def __init__(self, config):
+        self.username = config.get('login', 'username')
+        self.password = config.get('login', 'password')
+        if not self.username or not self.password:
+            print "username/password needed to log in to NuViewHR"
+            sys.exit(1)
+        cookieProcessor = urllib2.HTTPCookieProcessor()
+        self.opener = urllib2.build_opener(cookieProcessor)
+        self.opener.addheaders = [('User-agent', 'User-Agent=Mozilla/5.0')]
+        urllib2.install_opener(self.opener)
+        self.url = "https://kas.prod07.nuviewhr.com/WrkFlw.aspx"
+        self.token = ''
+        self.directory = {}
+
+    def login(self):
+        net = self.opener.open(self.url)
+        page = net.read()
+        net.close()
+        post = {}
+        tokenMatch = re.search(r'NuView.setToken\("(\d+)"\)', page)
+        if not tokenMatch:
+            return False
+        self.token  = tokenMatch.groups(1)[0]
+        passwd = 'hashed' + sha256(self.token + self.password).hexdigest()
+        post.update({'F_Token':         self.token,
+                     'F_Cmd':           'onClick',
+                     'F_Ctl':           'Login',
+                     'N_Logout_main_1': 'No',
+                     'N_User_main_1':   self.username,
+                     'N_Pswd_main_1':   passwd})
+        net = self.opener.open(self.url, urllib.urlencode(post))
+        page = net.read()
+        net.close()
+        failure = re.search(r'You could not be logged in', page)
+        if failure:
+            return False
+        return True
+
+    def saveDirectory(self, filepath):
+        post = {'F_Token':               self.token,
+                'F_Application':         'ESS',
+                'F_Mode':                '',
+                'F_Cmd':                 'Find',
+                'F_CmdLast':             '',
+                'F_CmdSend':             'CSV',
+                'F_Ctl':                 '',
+                'F_Frame':               '',
+                'F_View':                'find',
+                'F_NavForm':             'CmpDir',
+                'F_RowCnt_main':         '1',
+                'F_Id_main_1':           '0',
+                'N_Div_main_1':          '',
+                'N_FndFirstName_main_1': '',
+                'N_FndLastName_main_1':  '',
+                'N_Loc_main_1':          '',
+                'N_Unt_main_1':          ''}
+        net = self.opener.open(self.url, urllib.urlencode(post))
+        file(filepath, "w").write(net.read())
+        net.close()
+
+class BobPorter(object):
+    def __init__(self, fromFileName, toFileName):
+        self.fromFileName = fromFileName
+        self.toFileName   = toFileName
+        self.fromData     = self.loadReport(fromFileName)
+        self.toData       = self.loadReport(toFileName)
+ 
+    def loadReport(self, filename):
+        here = path.abspath(path.dirname(__file__))
+        filepath = path.join(here, filename)
+        if not path.isfile(filepath):
+            print "File %s not found"
+            sys.exit(1)
+        #print "Loading %s" % filename
+        reader = csv.DictReader(file(filepath))
+        report = {}
+        for row in reader:
+            name = "%s %s" % (row.get('First Name', ''), 
+                              row.get('Last Name', ''))
+            if name == "Kaseya Board of Directors": continue
+            report[name] = row
+        return report
+
+    def quickSummary(self, username):
+        teamTotals = {}
+        locTotals = {}
+        coyTotal = 0
+        haveJob = False
+        for name, row in self.toData.iteritems():
+            workaccount = row.get('Email Work', '').lower().split('@')[0]
+            if not haveJob and username == workaccount:
+                haveJob = True
+            team = row.get('Team', '***')
+            teamTotals[team] = teamTotals.get(team, 0) + 1
+            loc = row.get('Location', '***')
+            locTotals[loc] = locTotals.get(loc, 0) + 1
+            coyTotal += 1
+
+        teamIt = teamTotals.iteritems()
+        team, total = teamIt.next()
+        print "%s:%d" % (team[:3], total),
+        for team, total in teamIt:
+            print "%s:%d" % (team[:3], total),
+        print "Total:%d" % coyTotal
+        #for loc, total in locTotals.iteritems():
+        #    print "%s:%d" % (loc[:10], total)
+
+        if haveJob:
+            print "Congratulations you still have a job, today\n"
+        else:
+            print "Not going to work here anymore\n"
+
+    def compareReports(self):
+        print "Comparing %s with %s" % (self.fromFileName, self.toFileName)
+        oldKeys = self.fromData.viewkeys()
+        newKeys = self.toData.viewkeys()
+        hired = newKeys - oldKeys
+        left  = oldKeys - newKeys
+        if hired:
+            print "New hires:"
+            for name in hired:
+                row = self.toData[name]
+                print "+ %s, %s, %s in %s" % (name, 
+                                              row.get('Location', ''), 
+                                              row.get('Job Title', ''),
+                                              row.get('Team', ''))
+        if left:
+            print "Exploring other opportunities:"
+            for name in left:
+                row = self.fromData[name]
+                print "- %s, %s, %s in %s" % (name, 
+                                              row.get('Location', ''), 
+                                              row.get('Job Title', ''),
+                                              row.get('Team', ''))
+        if not hired and not left:
+            print "No changes"
+
+def main():
+    bob1 = BobSlydell()
+    fromReport, toReport = bob1.getReports()
+    bob2 = BobPorter(fromReport, toReport)
+    if bob1.toWhen is None:
+        bob2.quickSummary(bob1.config.get('login', 'username'))
+    if fromReport != toReport:
+        bob2.compareReports()
+
+if __name__ == "__main__":
+    main()
+
