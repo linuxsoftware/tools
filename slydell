@@ -256,8 +256,8 @@ class BobPorter(object):
 
     def compareReports(self):
         print "Comparing %s with %s" % (self.fromFileName, self.toFileName)
-        oldKeys = self.fromData.viewkeys()
-        newKeys = self.toData.viewkeys()
+        oldKeys = set(self.fromData.iterkeys())
+        newKeys = set(self.toData.iterkeys())
         hired = newKeys - oldKeys
         left  = oldKeys - newKeys
         if hired:
