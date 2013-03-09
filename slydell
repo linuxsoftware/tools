@@ -154,7 +154,6 @@ class NuViewHR(object):
         urllib2.install_opener(self.opener)
         self.url = "https://kas.prod07.nuviewhr.com/WrkFlw.aspx"
         self.token = ''
-        self.directory = {}
 
     def login(self):
         net = self.opener.open(self.url)
@@ -261,7 +260,7 @@ class BobPorter(object):
         hired = newKeys - oldKeys
         left  = oldKeys - newKeys
         if hired:
-            print "New hires:"
+            print "New hires:", len(hired)
             for name in hired:
                 row = self.toData[name]
                 print "+ %s, %s, %s in %s" % (name, 
@@ -269,7 +268,7 @@ class BobPorter(object):
                                               row.get('Job Title', ''),
                                               row.get('Team', ''))
         if left:
-            print "Exploring other opportunities:"
+            print "Exploring other opportunities:", len(left)
             for name in left:
                 row = self.fromData[name]
                 print "- %s, %s, %s in %s" % (name, 
