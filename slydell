@@ -6,6 +6,7 @@ import sys
 from os import path
 from ConfigParser import SafeConfigParser
 from datetime import date, timedelta
+import calendar
 import urllib
 import urllib2
 import re
@@ -24,8 +25,11 @@ class BobSlydell(object):
                           path.expanduser('~/slydell.cfg')])
         self.fromWhen = None
         self.toWhen   = None
-        self.reports  = []
+        self.churn    = False
         self.processArgs()
+        self.reports = [ filename for filename in os.listdir(self.here)
+                         if filename.startswith(self.prefix) ]
+        self.reports.sort()
  
     def processArgs(self):
         args = sys.argv[1:]
@@ -38,6 +42,9 @@ class BobSlydell(object):
                 args.pop(0)
                 if len(args) == 0: self.usage()
                 self.config.set('login', 'password', args.pop(0))
+            elif args[0] == "--churn":
+                args.pop(0)
+                self.churn = True
             elif args[0] == "--help":
                 self.usage()
             elif self.fromWhen is None:
@@ -53,6 +60,8 @@ class BobSlydell(object):
         print
         print "[--help]  displays this help"
         print
+        print "[--churn] generate a churn report"
+        print
         print "[--username <name>]  [--password <pwd>]"
         print "username and password to the NuViewHR system can be given"
         print "as command line options, or provided in the slydell.cfg file"
@@ -62,26 +71,25 @@ class BobSlydell(object):
         print "These can either be the filename of a report or a date"
         print "which slydell will use to find the nearest report"
         print "The date should be in ISO format yyyy-mm-dd, or one of "
-        print "the keywords yesterday, today, oldest, latest"
+        print "the keywords yesterday, today, oldest, latest, previous"
         sys.exit(1)
 
     def getReports(self):
-        self.reports = [ filename for filename in os.listdir(self.here)
-                         if filename.startswith(self.prefix) ]
         if len(self.reports) == 0:
             print "No previous reports found!!!\n"
             saveTodaysReport()
             sys.exit(1)
-        self.reports.sort()
         fromReport = toReport = ''
-        if self.fromWhen is None:
-            fromReport = self.reports[-1]
-        else:
-            fromReport = self.findReport(self.fromWhen)
         if self.toWhen is None:
             toReport = self.saveTodaysReport()
         else:
             toReport = self.findReport(self.toWhen)
+        if self.fromWhen is None:
+            fromReport = self.reports[-1]
+            if fromReport == toReport and len(self.reports) > 1:
+                fromReport = self.reports[-2]
+        else:
+            fromReport = self.findReport(self.fromWhen)
 
         return fromReport, toReport
 
@@ -94,6 +102,8 @@ class BobSlydell(object):
             whenFor = self.reports[0]
         elif whenFor == "latest":
             whenFor = self.reports[-1]
+        elif whenFor == "previous":
+            whenFor = self.reports[-2]
         if len(whenFor) == 10 and whenFor[4] == whenFor[7] == '-':
             filename = self.findClosestReportToDate(whenFor)
             if filename:
@@ -202,6 +212,7 @@ class NuViewHR(object):
         net.close()
 
 class BobPorter(object):
+    MinLocSize = 5
     def __init__(self, fromFileName, toFileName):
         self.fromFileName = fromFileName
         self.toFileName   = toFileName
@@ -218,74 +229,231 @@ class BobPorter(object):
         reader = csv.DictReader(file(filepath))
         report = {}
         for row in reader:
-            name = "%s %s" % (row.get('First Name', ''), 
-                              row.get('Last Name', ''))
-            if name == "Kaseya Board of Directors": continue
+            firstName = row.get('First Name', '')
+            lastName  = row.get('Last Name', '')
+            if lastName == "Board of Directors": continue
+            name = "%s %s" % (firstName, lastName)
+            if row.get('Location') == "India - Bangalore":
+                name = firstName.split()[0]
+                if name == "Basavaraj":
+                    name += "u"
             report[name] = row
         return report
 
-    def quickSummary(self, username):
+    def quickSummary(self, username=None):
         teamTotals = {}
-        locTotals = {}
+        locaTotals = {}
         coyTotal = 0
         haveJob = False
-        for name, row in self.toData.iteritems():
+        for row in self.toData.itervalues():
             workaccount = row.get('Email Work', '').lower().split('@')[0]
             if not haveJob and username == workaccount:
                 haveJob = True
             team = row.get('Team', '***')
             teamTotals[team] = teamTotals.get(team, 0) + 1
-            loc = row.get('Location', '***')
-            locTotals[loc] = locTotals.get(loc, 0) + 1
+            loca = row.get('Location', '***')
+            locaTotals[loca] = locaTotals.get(loca, 0) + 1
             coyTotal += 1
 
-        teamIt = teamTotals.iteritems()
-        team, total = teamIt.next()
-        print "%s:%d" % (team[:3], total),
-        for team, total in teamIt:
+        print "Current:",
+        for team, total in teamTotals.iteritems():
             print "%s:%d" % (team[:3], total),
         print "Total:%d" % coyTotal
-        #for loc, total in locTotals.iteritems():
-        #    print "%s:%d" % (loc[:10], total)
+        locBySize = {}
+        othSize = 0
+        for loca, total in locaTotals.iteritems():
+            if total <= self.MinLocSize:
+                othSize += total
+                continue
+            loc = self.getLoc(loca)
+            #print "%s = %s" % (loc, loca)
+            locBySize.setdefault(total, []).append(loc)
 
-        if haveJob:
-            print "Congratulations you still have a job, today\n"
-        else:
-            print "Not going to work here anymore\n"
+        print "        ",
+        for size in sorted(locBySize.keys(), reverse=True):
+            for loc in locBySize.get(size, []):
+                print "%s:%d" % (loc, size),
+        if othSize:
+            print "Others:%d" % (othSize),
+        print
+
+        if username is not None:
+            if haveJob:
+                print "Congratulations you still have a job, today\n"
+            else:
+                print "Not going to work here anymore\n"
+
+    def getLoc(self, location):
+        loc = location.split('-')[-1]
+        loc = loc.split(',')[0]
+        if loc.startswith("US "): loc = loc[3:]
+        if loc.startswith("Mexico "): loc = "Mex"
+        loc = loc.strip()
+        if " " in loc:
+            loc = "".join(word[0] for word in loc.split())
+        loc = loc[:3]
+        return loc
 
     def compareReports(self):
         print "Comparing %s with %s" % (self.fromFileName, self.toFileName)
         oldKeys = set(self.fromData.iterkeys())
         newKeys = set(self.toData.iterkeys())
         hired = newKeys - oldKeys
-        left  = oldKeys - newKeys
+        gone  = oldKeys - newKeys
+        teamHires  = {}
+        teamGoners = {}
+        teamChange = {}
+        locaHires  = {}
+        locaGoners = {}
+        locaChange = {}
+        def printRow(sign, row):
+            print "%s %s %s, %s, %s in %s" % (sign,
+                                           row.get('First Name', ''), 
+                                           row.get('Last Name', ''), 
+                                           row.get('Location', ''), 
+                                           row.get('Job Title', ''),
+                                           row.get('Team', ''))
+        def printTeamSummary(title, group):
+            if group:
+                print title,
+                for team, total in group.iteritems():
+                    print "%s:%d" % (team[:3], total),
+                print "Total: %d" % reduce(lambda x, y: x+y, group.itervalues(), 0)
+        def printLocationSummary(title, group):
+            if group:
+                print title,
+                for loca, total in group.iteritems():
+                    print "%s:%d" % (self.getLoc(loca), total),
+                print
         if hired:
             print "New hires:", len(hired)
             for name in hired:
                 row = self.toData[name]
-                print "+ %s, %s, %s in %s" % (name, 
-                                              row.get('Location', ''), 
-                                              row.get('Job Title', ''),
-                                              row.get('Team', ''))
-        if left:
-            print "Exploring other opportunities:", len(left)
-            for name in left:
+                team = row.get('Team', '***')
+                loca = row.get('Location', '***')
+                #if not team.startswith("Dev"): continue
+                printRow("+", row)
+                teamHires[team]  = teamHires.get(team, 0) + 1
+                teamChange[team] = teamChange.get(team, 0) + 1
+                locaHires[loca]  = locaHires.get(loca, 0) + 1
+                locaChange[loca] = locaChange.get(loca, 0) + 1
+        if gone:
+            print "Exploring other opportunities:", len(gone)
+            for name in gone:
                 row = self.fromData[name]
-                print "- %s, %s, %s in %s" % (name, 
-                                              row.get('Location', ''), 
-                                              row.get('Job Title', ''),
-                                              row.get('Team', ''))
-        if not hired and not left:
+                team = row.get('Team', '***')
+                loca = row.get('Location', '***')
+                #if not team.startswith("Dev"): continue
+                printRow("-", row)
+                teamGoners[team] = teamGoners.get(team, 0) + 1
+                teamChange[team] = teamChange.get(team, 0) - 1
+                locaGoners[loca] = locaGoners.get(loca, 0) + 1
+                locaChange[loca] = locaChange.get(loca, 0) - 1
+        if not hired and not gone:
             print "No changes"
+        else:
+            printTeamSummary("Gone:   ", teamGoners)
+            printLocationSummary("        ", locaGoners)
+            printTeamSummary("Hired:  ", teamHires)
+            printLocationSummary("        ", locaHires)
+            printTeamSummary("Change: ", teamChange)
+            printLocationSummary("        ", locaChange)
+
+    def calculateChurn(self, title):
+        spaces = " " * len(title)
+        print title,
+        teamGoners = {}
+        teamTotals = {}
+        locaGoners = {}
+        locaTotals = {}
+        oldKeys = set(self.fromData.iterkeys())
+        newKeys = set(self.toData.iterkeys())
+        gone  = oldKeys - newKeys
+        for name in oldKeys:
+            row = self.fromData[name]
+            team = row.get('Team', '***')
+            teamTotals[team] = teamTotals.get(team, 0) + 1
+            loca = row.get('Location', '***')
+            locaTotals[loca] = locaTotals.get(loca, 0) + 1
+        for name in gone:
+            row = self.fromData[name]
+            team = row.get('Team', '***')
+            teamGoners[team] = teamGoners.get(team, 0) + 1
+            loca = row.get('Location', '***')
+            locaGoners[loca] = locaGoners.get(loca, 0) + 1
+        for team, total in teamTotals.iteritems():
+            #if not team.startswith("Dev"): continue
+            churn = teamGoners.get(team, 0)
+            churnRate = float(churn) / total * 100
+            print "%s:%d/%d(%.1f%%)" % (team[:3], churn, total, churnRate),
+        totChurn = len(gone)
+        total = len(oldKeys)
+        totChurnRate = float(totChurn) / total * 100
+        print "Total:%d/%d(%.1f%%)" % (totChurn, total, totChurnRate)
+        othChurn = 0
+        othTotal = 0
+        print spaces,
+        for loca, total in locaTotals.iteritems():
+            churn = locaGoners.get(loca, 0)
+            if total <= self.MinLocSize:
+                othChurn += churn
+                othTotal += total
+                continue
+            if churn:
+                loc = self.getLoc(loca)
+                churnRate = float(churn) / total * 100
+                print "%s:%d/%d(%.1f%%)" % (loc, churn, total, churnRate),
+        if othChurn:
+            othChurnRate = float(othChurn) / othTotal * 100
+            print "Others:%d/%d(%.1f%%)" % (othChurn, othTotal, othChurnRate),
+        print
+        #self.compareReports()
+        #self.quickSummary()
+
+def churnReports(bob1):
+    print "Churn report"
+    prflen = len(bob1.prefix)
+    report1 = bob1.reports[0]
+    d1 = date(int(report1[prflen:prflen+4]),
+              int(report1[prflen+5:prflen+7]),
+              1)
+    reportn = bob1.reports[-1]
+    dn = date(int(reportn[prflen:prflen+4]),
+              int(reportn[prflen+5:prflen+7])+1,
+              1)
+    while d1 < dn:
+        m1 = d1.month
+        m1reports = [ filename for filename in bob1.reports
+                      if int(filename[prflen+5:prflen+7]) == m1 ]
+        m1reports.sort()
+        m2reports = [ filename for filename in bob1.reports
+                      if int(filename[prflen+5:prflen+7]) == m1+1 ]
+        m2reports.sort()
+        if m2reports:
+            m1reports.append(m2reports[0])
+        if len(m1reports) > 1:
+            # isn't going to report people who start and finish within a month
+            #print "Comparing %s with %s" % (m1reports[0], m1reports[-1])
+            bob2 = BobPorter(m1reports[0], m1reports[-1])
+            bob2.calculateChurn(d1.strftime("%b:"))
+        d1 += timedelta(days=calendar.monthrange(d1.year, d1.month)[1])
+
+def normalReports(bob1):
+    fromReport, toReport = bob1.getReports()
+    bob2 = BobPorter(fromReport, toReport)
+    if fromReport != toReport:
+        bob2.compareReports()
+    if bob1.toWhen is None:
+        bob2.quickSummary(bob1.config.get('login', 'username'))
+    else:
+        bob2.quickSummary()
 
 def main():
     bob1 = BobSlydell()
-    fromReport, toReport = bob1.getReports()
-    bob2 = BobPorter(fromReport, toReport)
-    if bob1.toWhen is None:
-        bob2.quickSummary(bob1.config.get('login', 'username'))
-    if fromReport != toReport:
-        bob2.compareReports()
+    if bob1.churn:
+        churnReports(bob1)
+    else:
+        normalReports(bob1)
 
 if __name__ == "__main__":
     main()
