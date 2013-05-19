@@ -77,7 +77,7 @@ class BobSlydell(object):
     def getReports(self):
         if len(self.reports) == 0:
             print "No previous reports found!!!\n"
-            saveTodaysReport()
+            self.saveTodaysReport()
             sys.exit(1)
         fromReport = toReport = ''
         if self.toWhen is None:
