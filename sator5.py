@@ -36,8 +36,7 @@ class SquareBuilder:
                                    word0[::-1]]
 
     def _matchOuterWords(self, word0, word1):
-        return ((word1[0] == word0[1] and word1[-1] == word0[-2]) or
-                (word1[-1] == word0[1] and word1[0] == word0[-2]))
+        return word1[0] == word0[1] and word1[-1] == word0[-2]
 
     def _matchInnerWord(self, word0, word1, word2):
         return (word2[0] == word0[2] and word2[1] == word1[2])
